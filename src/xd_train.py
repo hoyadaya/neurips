@@ -1,3 +1,4 @@
+# xd_train.py
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -11,6 +12,7 @@ from model import CLIPVAD, SingleModel
 from xd_test import test
 from utils.dataset import XDDataset
 from utils.tools import get_prompt_text, get_batch_label, cosine_scheduler
+from utils.CMA_MIL import CMAL  # 추가된 임포트
 import xd_option
 
 def CLASM(logits, labels, lengths, device):
@@ -69,6 +71,8 @@ def train(av_model, v_model, train_loader, test_loader, args, label_map: dict, d
         v_model.train()
         loss_total1 = 0
         loss_total2 = 0
+        loss_total3 = 0
+        loss_total_cmal = 0
         loss_v_total = 0
         
         for i, item in enumerate(train_loader):
@@ -77,19 +81,20 @@ def train(av_model, v_model, train_loader, test_loader, args, label_map: dict, d
             visual_feat = visual_feat.to(device)
             audio_feat = audio_feat.to(device)
             feat_lengths = feat_lengths.to(device)
-            # text_labels를 dataset에서 그대로 사용 (get_prompt_text 대신)
+            # text_labels는 dataset에서 그대로 사용 (get_prompt_text로 생성한 prompt_text와 함께)
             text_labels = get_batch_label(text_labels, prompt_text, label_map).to(device)
 
-            # Visual-only model forward
+            # Visual-only 모델 forward
             v_features, v_logits = v_model(visual_feat, None, feat_lengths)
             loss_v = CLAS2(v_logits, text_labels, feat_lengths, device)
             loss_v_total += loss_v.item()
             
-            # Audio-visual model forward
+            # Audio-visual 모델 forward
             text_features, logits1, logits2, logits_visual, logits_audio, logits_av = av_model(
                 visual_feat, audio_feat, None, prompt_text, feat_lengths)
             
-            loss1 = CLAS2(logits1, text_labels, feat_lengths, device)
+            # 수정: 기존 logits1 대신 logits_av를 사용하여 분류 loss 계산
+            loss1 = CLAS2(logits_av, text_labels, feat_lengths, device)
             loss_total1 += loss1.item()
 
             loss2 = CLASM(logits2, text_labels, feat_lengths, device)
@@ -101,9 +106,39 @@ def train(av_model, v_model, train_loader, test_loader, args, label_map: dict, d
                 text_feature_abr = text_features[j] / text_features[j].norm(dim=-1, keepdim=True)
                 loss3 += torch.abs(text_feature_normal @ text_feature_abr)
             loss3 = loss3 / 6
+            loss_total3 += loss3.item()
 
-            loss_av = loss1 + loss2 + loss3 * 1e-4
+            # 추가: MACIL_SD의 크로스 모달 대조 학습 손실 계산
+            visual_features, audio_features = av_model.encode_video(visual_feat, audio_feat, None, feat_lengths)
+            
+            # 샘플 레벨 예측 생성 (배치의 각 항목에 대한 단일 예측값)
+            sample_level_preds = torch.zeros(logits_visual.shape[0]).to(device)
+            for j in range(logits_visual.shape[0]):
+                tmp, _ = torch.topk(logits_visual[j, 0:feat_lengths[j]].squeeze(-1), k=int(feat_lengths[j] / 16 + 1), largest=True)
+                sample_level_preds[j] = torch.sigmoid(torch.mean(tmp))
+            
+            # CMAL 손실 계산 - logits_visual을 mmil_logits 대신 사용
+            loss_a2v_a2b, loss_a2v_a2n, loss_v2a_a2b, loss_v2a_a2n = CMAL(
+                sample_level_preds, 
+                logits_audio.squeeze(-1), 
+                logits_visual.squeeze(-1), 
+                feat_lengths, 
+                audio_features, 
+                visual_features
+            )
+            
+            # CMAL 손실 합산 (가중치는 실험에 따라 조정)
+            cmal_loss = (loss_a2v_a2b + loss_a2v_a2n + loss_v2a_a2b + loss_v2a_a2n) * 0.25
+            
+            # 수정: cmal_loss가 tensor인지 float인지 확인하고 처리
+            if isinstance(cmal_loss, torch.Tensor):
+                loss_total_cmal += cmal_loss.item()
+            else:
+                loss_total_cmal += cmal_loss  # float인 경우 직접 더함
 
+            # 최종 손실 계산 (CMAL 손실 추가)
+            loss_av = loss1 + loss2 + loss3 * 1e-4 + cmal_loss
+            
             optimizer_v.zero_grad()
             loss_v.backward()
             optimizer_v.step()
@@ -114,8 +149,8 @@ def train(av_model, v_model, train_loader, test_loader, args, label_map: dict, d
             
             if step % 4800 == 0 and step != 0:
                 print(f"Epoch {e+1}, Step {step}:")
-                print("  AV Loss1: {:.4f}, AV Loss2: {:.4f}, V Loss: {:.4f}, Loss3: {:.4f}".format(
-                    loss_total1/(i+1), loss_total2/(i+1), loss_v_total/(i+1), loss3.item()))
+                print("  AV Loss1: {:.4f}, AV Loss2: {:.4f}, AV Loss3: {:.4f}, CMAL Loss: {:.4f}, V Loss: {:.4f}".format(
+                    loss_total1/(i+1), loss_total2/(i+1), loss_total3/(i+1), loss_total_cmal/(i+1), loss_v_total/(i+1)))
                 
                 # 중간 디버깅 평가: 테스트 데이터셋으로 AUC, AP, mAP 출력
                 print("  --> Running mid-epoch evaluation ...")

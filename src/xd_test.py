@@ -1,3 +1,4 @@
+# xd_test.py
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -48,38 +49,42 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
             lengths = lengths.to(int)
             padding_mask = get_batch_mask(lengths, maxlen).to(device)
             
-            _, logits1, logits2, logits_visual, logits_audio, logits_av = model(
+            # 모델 출력: logits1 대신 logits_av를 사용하도록 수정
+            _, _, logits2, logits_visual, logits_audio, logits_av = model(
                 visual, audio, padding_mask, prompt_text, lengths)
                 
-            logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1], logits1.shape[2])
+            # logits_av의 shape를 1차원으로 reshape하여 확률 계산에 사용
+            logits_av = logits_av.reshape(-1)
             logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
             
-            # Use maximum of the predictions for binary detection
+            # logits_av를 sigmoid를 통해 이진 분류 확률로 변환
+            prob_av = torch.sigmoid(logits_av[0:len_cur])
+            # logits2는 기존 방식대로 처리
             prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
-            prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
 
             if i == 0:
-                ap1 = prob1
+                ap_av = prob_av
                 ap2 = prob2
             else:
-                ap1 = torch.cat([ap1, prob1], dim=0)
+                ap_av = torch.cat([ap_av, prob_av], dim=0)
                 ap2 = torch.cat([ap2, prob2], dim=0)
 
             element_logits2 = logits2[0:len_cur].softmax(dim=-1).detach().cpu().numpy()
             element_logits2 = np.repeat(element_logits2, 16, 0)
             element_logits2_stack.append(element_logits2)
 
-    ap1 = ap1.cpu().numpy()
+    ap_av = ap_av.cpu().numpy()
     ap2 = ap2.cpu().numpy()
-    ap1 = ap1.tolist()
+    ap_av = ap_av.tolist()
     ap2 = ap2.tolist()
 
-    ROC1 = roc_auc_score(gt, np.repeat(ap1, 16))
-    AP1 = average_precision_score(gt, np.repeat(ap1, 16))
+    # logits_av를 사용한 분류 성능 계산
+    ROC_av = roc_auc_score(gt, np.repeat(ap_av, 16))
+    AP_av = average_precision_score(gt, np.repeat(ap_av, 16))
     ROC2 = roc_auc_score(gt, np.repeat(ap2, 16))
     AP2 = average_precision_score(gt, np.repeat(ap2, 16))
 
-    print("AUC1: ", ROC1, " AP1: ", AP1)
+    print("AUC (using logits_av): ", ROC_av, " AP (using logits_av): ", AP_av)
     print("AUC2: ", ROC2, " AP2:", AP2)
 
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
@@ -90,14 +95,15 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     averageMAP = averageMAP/(i+1)
     print('average MAP: {:.2f}'.format(averageMAP))
 
-    return ROC1, AP2, averageMAP
+    return ROC_av, AP2, averageMAP
 
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = xd_option.parser.parse_args()
 
-    label_map = dict({'A': 'normal', 'B1': 'fighting', 'B2': 'shooting', 'B4': 'riot', 'B5': 'abuse', 'B6': 'car accident', 'G': 'explosion'})
+    label_map = dict({'A': 'normal', 'B1': 'fighting', 'B2': 'shooting', 'B4': 'riot', 
+                      'B5': 'abuse', 'B6': 'car accident', 'G': 'explosion'})
 
     test_dataset = XDDataset(args.visual_length, args.test_list, args.test_audio_list, True, label_map)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
@@ -108,8 +114,8 @@ if __name__ == '__main__':
     gtlabels = np.load(args.gt_label_path, allow_pickle=True)
 
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length, args.visual_width, 
-                   args.visual_head, args.visual_layers, args.attn_window, args.prompt_prefix, 
-                   args.prompt_postfix, args.audio_dim, device)
+                    args.visual_head, args.visual_layers, args.attn_window, args.prompt_prefix, 
+                    args.prompt_postfix, args.audio_dim, device)
                    
     model_param = torch.load(args.model_path)
     model.load_state_dict(model_param)

@@ -367,14 +367,16 @@ class CLIPVAD(nn.Module):
         logits_audio = self.audio_classifier(audio_features + self.mlp2(audio_features))
         
         combined_features = torch.cat([visual_features, audio_features], dim=-1)
-        logits_av = self.av_classifier(combined_features).squeeze(-1)
+        logits_av_3d = self.av_classifier(combined_features)  # 3차원 텐서 [batch_size, seq_len, 1]
+        logits_av = logits_av_3d.squeeze(-1)  # 2차원 텐서 [batch_size, seq_len]
         
         logits1 = torch.maximum(logits_visual, logits_audio)
         
         text_features_ori = self.encode_textprompt(text)
         
         text_features = text_features_ori
-        logits_attn = logits1.permute(0, 2, 1)
+        # 3차원 logits_av_3d를 사용하여 permute
+        logits_attn = logits_av_3d.permute(0, 2, 1)  # [batch_size, 1, seq_len]
         visual_attn = logits_attn @ visual_features
         visual_attn = visual_attn / visual_attn.norm(dim=-1, keepdim=True)
         visual_attn = visual_attn.expand(visual_attn.shape[0], text_features_ori.shape[0], visual_attn.shape[2])

@@ -19,10 +19,10 @@ parser.add_argument('--m', default=0.91, type=float, help='Self-distillation mix
 parser.add_argument('--distill-weight', default=1.0, type=float, help='Weight for distillation loss')
 
 parser.add_argument('--max-epoch', default=20, type=int)
-parser.add_argument('--model-path', default='model5/model_xd.pth')
+parser.add_argument('--model-path', default='model1/model_xd.pth')
 parser.add_argument('--use-checkpoint', default=False, type=bool)
-parser.add_argument('--checkpoint-path', default='model5/checkpoint.pth')
-parser.add_argument('--batch-size', default=64, type=int)  # Reduced batch size for dual model training
+parser.add_argument('--checkpoint-path', default='model1/checkpoint.pth')
+parser.add_argument('--batch-size', default=96, type=int)  # Reduced batch size for dual model training
 parser.add_argument('--train-list', default='list/xd_CLIP_rgb.csv')
 parser.add_argument('--test-list', default='list/xd_CLIP_rgbtest.csv')
 parser.add_argument('--audio-list', default='list/xd_CLIP_audio.csv')  # Added for MACIL-SD
